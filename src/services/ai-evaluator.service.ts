@@ -36,20 +36,42 @@ export interface EvaluationResult {
 
 /**
  * Sanitizes and compacts raw extracted PDF text to keep payload clean,
- * reduce prompt token size, and minimize API latency.
- * Slices to a maximum of 4,000 characters.
+ * reduce prompt token size, and optimize LLM attention.
+ *
+ * Head & Tail Extraction Strategy (40,000 character maximum ceiling):
+ * - If normalized text <= 40,000 characters: retains entire text.
+ * - If normalized text > 40,000 characters: retains the first 24,000 characters (overview,
+ *   problem, solution, market opportunity) and the last 16,000 characters (traction,
+ *   financials, round economics, valuation, and team), separated by a truncation marker.
  */
 export const cleanExtractedText = (rawText?: string): string => {
   if (!rawText) return "";
-  return rawText
+
+  // 1. Token efficiency: Strip consecutive empty lines and excessive whitespace before length calculation
+  const sanitized = rawText
     .replace(/\t+/g, " ")
     .replace(/[^\S\r\n]+/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\r\n/g, "\n")
     .replace(/\n\s*\n+/g, "\n")
-    .trim()
-    .slice(0, 4000);
+    .trim();
+
+  const MAX_CHARS = 40000;
+  const HEAD_CHARS = 24000;
+  const TAIL_CHARS = 16000;
+
+  // 2. Head & Tail extraction strategy
+  if (sanitized.length <= MAX_CHARS) {
+    return sanitized;
+  }
+
+  const head = sanitized.slice(0, HEAD_CHARS);
+  const tail = sanitized.slice(-TAIL_CHARS);
+  const truncationMarker =
+    "\n\n[... Core middle operational details truncated for evaluation ...]\n\n";
+
+  return `${head}${truncationMarker}${tail}`;
 };
 
 /**
@@ -262,7 +284,7 @@ STARTUP SUBMISSION METADATA:
 - Ask Amount: $${input.pitchData.askAmount.toLocaleString()}
 - Valuation: $${input.pitchData.valuation.toLocaleString()}
 
-EXTRACTED PITCH DECK TEXT (FIRST 4,000 CHARACTERS):
+EXTRACTED PITCH DECK TEXT (UP TO 40,000 CHARACTERS):
 ${cleanedText || "No PDF deck attached; evaluate submitted deal data."}
 
 JSON OUTPUT REQUIREMENTS:

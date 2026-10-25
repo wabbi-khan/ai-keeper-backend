@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model InvestorUser {
+  id           String          @id @default(uuid())
+  name         String
+  email        String          @unique
+  passwordHash String          @default("demo_hash")
+  firmName     String
+  slug         String          @unique
+  role         String          @default("Managing Partner")
+  thesis       InvestorThesis?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+}
+
+model InvestorThesis {
+  id             String       @id @default(uuid())
+  firmName       String
+  slug           String       @unique
+  targetSectors  String[]
+  minMonthlyRev  Float        @default(0)
+  maxValuation   Float        @default(10000000)
+  preferredStage String       @default("Seed")
+  customCriteria String       @db.Text
+  investorId     String       @unique
+  investor       InvestorUser @relation(fields: [investorId], references: [id], onDelete: Cascade)
+  pitches        Pitch[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Pitch {
+  id            String         @id @default(uuid())
+  startupName   String
+  tagline       String
+  founderNames  String
+  founderEmail  String
+  sector        String
+  stage         String         @default("Seed")
+  reportedMrr   Float          @default(0)
+  askAmount     Float          @default(0)
+  valuation     Float          @default(0)
+  extractedText String?        @db.Text
+  matchScore    Int            // 0 to 100
+  status        String         @default("REVIEW") // TOP_1_PERCENT, REVIEW, REJECTED
+  summary       String         @db.Text
+  pros          String[]
+  cons          String[]
+  redFlags      String[]
+  submittedAt   DateTime       @default(now())
+  thesisId      String
+  thesis        InvestorThesis @relation(fields: [thesisId], references: [id], onDelete: Cascade)
+}

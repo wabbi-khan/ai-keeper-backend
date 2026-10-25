@@ -35,18 +35,39 @@ export interface EvaluationResult {
 }
 
 /**
+ * Sanitizes and compacts raw extracted PDF text to keep payload clean,
+ * reduce prompt token size, and minimize API latency.
+ * Slices to a maximum of 4,000 characters.
+ */
+export const cleanExtractedText = (rawText?: string): string => {
+  if (!rawText) return "";
+  return rawText
+    .replace(/\t+/g, " ")
+    .replace(/[^\S\r\n]+/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n\s*\n+/g, "\n")
+    .trim()
+    .slice(0, 4000);
+};
+
+/**
  * Deterministic institutional evaluation fallback engine
- * Used when OPENAI_API_KEY is missing or when the API call fails or times out.
+ * Used when GROQ_API_KEY is missing or when the API call fails or times out.
  */
 export const evaluatePitchDeckFallback = (
   input: PitchEvaluationInput,
 ): EvaluationResult => {
   const { pitchData, thesis, pdfText } = input;
-  let score = 75;
+  const cleanedText = cleanExtractedText(pdfText);
+  let score = 50;
 
   const redFlags: string[] = [];
   const pros: string[] = [];
-  const cons: string[] = [];
+  const cons: string[] = [
+    "Unverified document: Automated AI parsing was unavailable at submission time; manual document review is required.",
+  ];
 
   // 1. Sector vertical alignment
   const sectorMatch = thesis.targetSectors.some(
@@ -56,12 +77,12 @@ export const evaluatePitchDeckFallback = (
   );
 
   if (sectorMatch) {
-    score += 10;
+    score += 5;
     pros.push(
       `Direct sector alignment with active investment mandate (${pitchData.sector}).`,
     );
   } else {
-    score -= 15;
+    score -= 5;
     redFlags.push(
       `Vertical divergence: '${pitchData.sector}' is outside mandated target sectors [${thesis.targetSectors.join(", ")}].`,
     );
@@ -69,12 +90,12 @@ export const evaluatePitchDeckFallback = (
 
   // 2. MRR check
   if (pitchData.reportedMrr >= thesis.minMonthlyRev) {
-    score += 10;
+    score += 5;
     pros.push(
       `Reported MRR ($${pitchData.reportedMrr.toLocaleString()}/mo) meets or exceeds threshold ($${thesis.minMonthlyRev.toLocaleString()}/mo).`,
     );
   } else {
-    score -= 22;
+    score -= 5;
     redFlags.push(
       `Revenue deficit: Reported MRR ($${pitchData.reportedMrr.toLocaleString()}) falls below fund minimum ($${thesis.minMonthlyRev.toLocaleString()}/mo).`,
     );
@@ -82,12 +103,12 @@ export const evaluatePitchDeckFallback = (
 
   // 3. Valuation check
   if (pitchData.valuation > 0 && pitchData.valuation <= thesis.maxValuation) {
-    score += 5;
+    score += 3;
     pros.push(
       `Target valuation ($${pitchData.valuation.toLocaleString()}) fits comfortably within $${thesis.maxValuation.toLocaleString()} fund cap.`,
     );
   } else if (pitchData.valuation > thesis.maxValuation) {
-    score -= 18;
+    score -= 5;
     redFlags.push(
       `Valuation overshoot: Valuation of $${pitchData.valuation.toLocaleString()} exceeds mandated cap of $${thesis.maxValuation.toLocaleString()}.`,
     );
@@ -101,7 +122,7 @@ export const evaluatePitchDeckFallback = (
     pitchData.stage.toLowerCase().includes(thesis.preferredStage.toLowerCase());
 
   if (stageMatch) {
-    score += 5;
+    score += 2;
   } else {
     cons.push(
       `Investment stage mismatch: Startup submitted as ${pitchData.stage}, whereas partnership prefers ${thesis.preferredStage}.`,
@@ -120,27 +141,24 @@ export const evaluatePitchDeckFallback = (
     }
   }
 
-  // 6. Documentation quality & Validity
-  const isInvalidDocument = pdfText
+  // 6. Documentation quality & Validity check
+  const isInvalidDocument = cleanedText
     ? /(fbr|federal board of revenue|taxpayer|tax return|tax certificate|national tax|income tax|inland revenue|curriculum vitae|resume|birth certificate|passport|bank statement|utility bill|challan)/i.test(
-        pdfText,
+        cleanedText,
       )
     : false;
 
   if (isInvalidDocument) {
-    score = 18;
     redFlags.unshift(
       "Invalid Document: Uploaded file is not a startup pitch deck (detected tax/administrative/personal paperwork). Formal startup pitch deck is required.",
     );
-  } else if (pdfText && pdfText.trim().length > 150) {
-    score += 2;
-  } else {
+  } else if (!cleanedText || cleanedText.length <= 150) {
     cons.push(
       "Pitch deck text extraction limited; qualitative review recommended.",
     );
   }
 
-  // Fill standard pros and cons if needed
+  // Fill standard pros if needed
   if (pros.length < 3) {
     pros.push(
       `Active founder leadership by ${pitchData.founderNames} in ${pitchData.sector}.`,
@@ -157,88 +175,84 @@ export const evaluatePitchDeckFallback = (
     );
   }
 
-  score = Math.max(15, Math.min(97, score));
+  // 1. Cap Fallback Score to Neutral: strictly between 40 and 55 (never exceeds 55, never reaches TOP_1_PERCENT)
+  const finalScore = Math.max(40, Math.min(55, score));
 
-  let status: "TOP_1_PERCENT" | "REVIEW" | "REJECTED";
-  if (score >= 85) {
-    status = "TOP_1_PERCENT";
-  } else if (score >= 60) {
-    status = "REVIEW";
-  } else {
-    status = "REJECTED";
-  }
+  // 2. Enforce Status: force status to 'REVIEW' whenever fallback engine is triggered
+  const status: "TOP_1_PERCENT" | "REVIEW" | "REJECTED" = "REVIEW";
 
-  const summary = `${pitchData.startupName} is a ${pitchData.stage}-stage venture in ${pitchData.sector} reporting $${pitchData.reportedMrr.toLocaleString()}/mo MRR. Autonomous gatekeeper evaluation assigned a ${score}/100 mandate alignment score relative to ${thesis.firmName}'s investment parameters.`;
+  // 3. Transparent Fallback Summary
+  const summary =
+    "Automated AI evaluation is temporarily unavailable due to upstream service demand. Deal data recorded with a neutral baseline and queued for manual analyst review against " +
+    thesis.firmName +
+    "'s thesis parameters.";
 
   return {
-    matchScore: score,
+    matchScore: finalScore,
     status,
     summary,
     pros: pros.slice(0, 3),
-    cons: cons.slice(0, 2),
+    cons: cons.slice(0, 3),
     redFlags,
   };
 };
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
- * Identifies transient OpenAI errors such as HTTP 503, 502, 429 (rate limit), or high demand.
- */
-const isTransientOpenAIError = (error: any): boolean => {
-  if (!error) return false;
-  const status = error.status || error.code || error.statusCode;
-  if (status === 503 || status === 502 || status === 504 || status === 429) {
-    return true;
-  }
-  const msg = String(error.message || error).toLowerCase();
-  return (
-    msg.includes("503") ||
-    msg.includes("502") ||
-    msg.includes("504") ||
-    msg.includes("429") ||
-    msg.includes("rate limit") ||
-    msg.includes("high demand") ||
-    msg.includes("overloaded") ||
-    msg.includes("temporarily unavailable") ||
-    msg.includes("service unavailable")
-  );
-};
-
-/**
- * Main AI Evaluator service using OpenAI with automatic deterministic fallback.
+ * Main AI Evaluator service using Groq API (via OpenAI SDK) with automatic deterministic fallback.
  */
 export const evaluatePitchDeck = async (
   input: PitchEvaluationInput,
 ): Promise<EvaluationResult> => {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
 
   if (!apiKey) {
     console.warn(
-      "OPENAI_API_KEY is not defined. Using deterministic evaluation fallback.",
+      "GROQ_API_KEY is not defined. Using deterministic evaluation fallback.",
     );
     return evaluatePitchDeckFallback(input);
   }
 
+  const cleanedText = cleanExtractedText(input.pdfText);
+
   try {
-    const openai = new OpenAI({
+    const groq = new OpenAI({
       apiKey,
-      timeout: 20000, // 20s request timeout
-      maxRetries: 1,
+      baseURL: "https://api.groq.com/openai/v1",
     });
 
-    const prompt = `Conduct a rigorous institutional gatekeeper evaluation of this startup's pitch deck submission against our investment thesis mandate.
+    const prompt = `You are a Senior Institutional Investment Analyst at ${input.thesis.firmName}.
+Conduct a rigorous gatekeeper evaluation of this startup submission against our investment thesis mandate.
 
-INVESTOR THESIS MANDATE:
-- Firm Name: ${input.thesis.firmName}
+MANDATORY STEP 1 — GENERALIZED PITCH DECK AUTHENTICITY & FORMAT CHECK:
+First, critically evaluate whether the EXTRACTED PITCH DECK TEXT genuinely represents a legitimate Startup Pitch Deck or Investor Presentation.
+- A valid pitch deck must exhibit core venture components such as:
+  * Problem statement / market pain point
+  * Solution, value proposition, or product architecture
+  * Market size / TAM / SAM / SOM
+  * Business model, pricing, or go-to-market strategy
+  * Traction, milestones, KPIs, or growth metrics
+  * Investment ask, fundraise target, or use of funds
+
+DISQUALIFICATION RULE:
+If the extracted text lacks these structural characteristics OR represents any other document type (e.g. personal resumes/CVs, tax certificates/FBR/IRS papers, utility bills, receipts, legal contracts, invoices, academic research articles, certificates, or unrelated random text):
+1. Immediately assign matchScore between 5 and 15 (maximum 15).
+2. Set status strictly to "REJECTED".
+3. Add this critical note to redFlags:
+   "Invalid document type: The uploaded document does not qualify as a startup pitch deck or investor presentation."
+4. Set summary stating clearly that the document was rejected because it does not qualify as a startup pitch deck or investor presentation.
+5. In pros, provide a brief note indicating manual document resubmission is required.
+6. In cons, list the missing core venture components (e.g. "Missing problem/solution narrative, traction metrics, and fundraise economics.").
+7. CRITICAL: Do NOT evaluate MRR, valuation, dilution, or sector mandate alignment if the document is not a pitch deck.
+
+STEP 2 — MANDATE EVALUATION (ONLY IF STEP 1 PASSES AS A LEGITIMATE PITCH DECK):
+Only proceed with thesis mandate matching (sector alignment, MRR requirements, valuation caps, dilution analysis) if the document successfully passes Step 1 as a legitimate pitch deck:
 - Target Sectors: ${input.thesis.targetSectors.join(", ")}
 - Minimum Monthly Revenue (MRR): $${input.thesis.minMonthlyRev.toLocaleString()}
 - Maximum Valuation Cap: $${input.thesis.maxValuation.toLocaleString()}
 - Preferred Stage: ${input.thesis.preferredStage}
 - Mandate Criteria: ${input.thesis.customCriteria}
 
-STARTUP SUBMISSION:
+STARTUP SUBMISSION METADATA:
 - Name: ${input.pitchData.startupName}
 - Tagline: ${input.pitchData.tagline || "N/A"}
 - Founders: ${input.pitchData.founderNames} (${input.pitchData.founderEmail})
@@ -248,84 +262,67 @@ STARTUP SUBMISSION:
 - Ask Amount: $${input.pitchData.askAmount.toLocaleString()}
 - Valuation: $${input.pitchData.valuation.toLocaleString()}
 
-EXTRACTED PITCH DECK TEXT:
-${input.pdfText ? input.pdfText.slice(0, 4000) : "No PDF deck attached; evaluate submitted deal data."}
+EXTRACTED PITCH DECK TEXT (FIRST 4,000 CHARACTERS):
+${cleanedText || "No PDF deck attached; evaluate submitted deal data."}
 
-CRITICAL DOCUMENT VALIDATION RULE:
-Examine the EXTRACTED PITCH DECK TEXT above.
-If the extracted text indicates the file is NOT a genuine startup pitch deck (e.g. it is a tax certificate, FBR or IRS document, taxpayer registration, government paperwork, personal resume / CV, invoice, utility bill, or unrelated administrative paperwork):
-1. You MUST heavily penalize the matchScore: assign an integer strictly BELOW 30 (e.g., between 10 and 25).
-2. You MUST set status to "REJECTED".
-3. You MUST include this explicit redFlag: "Invalid Document: The uploaded PDF is not a valid startup pitch deck (appears to be administrative, tax, or personal paperwork). A formal investor pitch deck is required."
-4. In the summary, state clearly that the submission was rejected due to an invalid/non-pitch deck document upload.
-
-INSTRUCTIONS:
+JSON OUTPUT REQUIREMENTS:
 Return STRICT JSON with the following structure:
 {
-  "matchScore": integer (0 to 100),
-  "status": "TOP_1_PERCENT" (if score >= 85), "REVIEW" (if score 60-84), or "REJECTED" (if score < 60 or document invalid),
+  "matchScore": integer (0 to 100, or 5-15 if document fails Step 1),
+  "status": "TOP_1_PERCENT" (if score >= 85), "REVIEW" (if score 60-84), or "REJECTED" (if score < 60 or invalid document),
   "summary": "Exactly 2 concise sentences providing an institutional briefing.",
-  "pros": ["3 specific startup strengths"],
-  "cons": ["2 specific operational or market risks"],
-  "redFlags": ["Array of critical violations like invalid document, valuation > cap, or MRR < minimum. Return empty array if none."]
+  "pros": ["3 specific startup strengths, or note if rejected at Step 1"],
+  "cons": ["2 specific operational or market risks, or missing deck sections"],
+  "redFlags": ["Array of critical violations like invalid document type, valuation > cap, or MRR < minimum. Return empty array if none."]
 }`;
 
-    const maxRetries = 2;
-    const retryDelayMs = 2000;
-    let responseText: string | null = null;
+    const primaryModel = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+    const candidateModels = [
+      primaryModel,
+      "llama-3.1-8b-instant",
+      "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b",
+    ];
+    // Deduplicate candidate models
+    const modelsToTry = Array.from(new Set(candidateModels));
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let completion: any;
+    let lastError: any;
+
+    for (const model of modelsToTry) {
       try {
-        const completionPromise = openai.chat.completions.create({
-          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-          response_format: { type: "json_object" },
+        completion = await groq.chat.completions.create({
+          model,
           messages: [
             {
               role: "system",
-              content: `You are a Senior Institutional Investment Analyst at ${input.thesis.firmName}. You evaluate startup pitches against thesis mandates with strict institutional precision. Always output valid JSON.`,
+              content:
+                "You are a Senior Institutional Investment Analyst and Gatekeeper. Respond ONLY with a valid JSON object matching the requested schema.",
             },
             {
               role: "user",
               content: prompt,
             },
           ],
+          response_format: { type: "json_object" },
           temperature: 0.2,
+          max_tokens: 1500,
         });
 
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error("OpenAI API call timed out after 20s")),
-            20000,
-          ),
-        );
-
-        const response = await Promise.race([
-          completionPromise,
-          timeoutPromise,
-        ]);
-        responseText = response.choices[0]?.message?.content || null;
-
-        if (responseText) {
+        if (completion?.choices?.[0]?.message?.content) {
           break;
         }
-
-        throw new Error("Empty response from OpenAI API");
       } catch (callError: any) {
-        const canRetry =
-          attempt < maxRetries && isTransientOpenAIError(callError);
-        if (canRetry) {
-          console.warn(
-            `⚠️ OpenAI API transient error (${callError.message || callError}). Retrying in ${retryDelayMs / 1000}s (retry ${attempt + 1}/${maxRetries})...`,
-          );
-          await sleep(retryDelayMs);
-          continue;
-        }
-        throw callError;
+        lastError = callError;
+        console.warn(
+          `⚠️ Groq model '${model}' error: ${callError.message || callError}. Attempting alternative model...`,
+        );
       }
     }
 
+    const responseText = completion?.choices?.[0]?.message?.content;
     if (!responseText) {
-      throw new Error("Empty response from OpenAI API");
+      throw lastError || new Error("Empty response from Groq API");
     }
 
     const parsed = JSON.parse(responseText);
@@ -333,7 +330,7 @@ Return STRICT JSON with the following structure:
     let matchScore =
       typeof parsed.matchScore === "number"
         ? Math.round(parsed.matchScore)
-        : 75;
+        : 50;
     matchScore = Math.max(0, Math.min(100, matchScore));
 
     let status: "TOP_1_PERCENT" | "REVIEW" | "REJECTED";
@@ -363,7 +360,7 @@ Return STRICT JSON with the following structure:
     };
   } catch (error: any) {
     console.warn(
-      "OpenAI evaluation failed or timed out. Falling back to deterministic engine:",
+      "Groq AI evaluation failed or timed out. Falling back to deterministic engine:",
       error.message,
     );
     return evaluatePitchDeckFallback(input);

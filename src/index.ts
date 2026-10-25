@@ -7,6 +7,8 @@ import authRoutes from './routes/auth.routes';
 import thesisRoutes from './routes/thesis.routes';
 import pitchRoutes from './routes/pitch.routes';
 
+import path from 'path';
+
 const app = express();
 
 // Middlewares
@@ -18,6 +20,9 @@ app.use(
 );
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve uploaded pitch decks statically
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // Raw Swagger JSON Spec
 app.get('/api-docs.json', (_req: Request, res: Response) => {

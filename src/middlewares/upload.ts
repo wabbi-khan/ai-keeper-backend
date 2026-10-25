@@ -22,29 +22,36 @@ const fileFilter = (
 export const upload = multer({
   storage,
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15MB maximum
+    fileSize: 25 * 1024 * 1024, // 25MB maximum
   },
   fileFilter,
 });
 
 /**
- * Middleware wrapper around upload.single('pitchDeck') to catch errors
- * and return structured 400 responses for non-PDF files and file size limits.
+ * Handles pitch deck upload in-memory supporting field names: 'file', 'pitchDeck', or 'deck'.
+ */
+const uploadAnyField = upload.fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'pitchDeck', maxCount: 1 },
+  { name: 'deck', maxCount: 1 },
+]);
+
+/**
+ * Middleware wrapper around Multer memoryStorage to catch errors,
+ * normalize req.file from fields, and return structured 400 responses.
  */
 export const handlePitchDeckUpload = (
   req: Request,
   res: Response,
   next: NextFunction
 ): void => {
-  const uploadSingle = upload.single('pitchDeck');
-
-  uploadSingle(req, res, (err: any) => {
+  uploadAnyField(req, res, (err: any) => {
     if (err) {
       if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_FILE_SIZE') {
           res.status(400).json({
             success: false,
-            message: 'Pitch deck PDF exceeds maximum allowed size of 15MB.',
+            message: 'Pitch deck PDF exceeds maximum allowed size of 25MB.',
           });
           return;
         }
@@ -61,6 +68,13 @@ export const handlePitchDeckUpload = (
       });
       return;
     }
+
+    // Normalize req.file if uploaded via fields
+    if (!req.file && req.files) {
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+      req.file = files['file']?.[0] || files['pitchDeck']?.[0] || files['deck']?.[0];
+    }
+
     next();
   });
 };

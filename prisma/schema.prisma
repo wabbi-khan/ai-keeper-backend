@@ -38,6 +38,12 @@ model InvestorThesis {
 
 model Pitch {
   id            String         @id @default(uuid())
+  referenceId   String?        @unique
+  deckData      Bytes?
+  deckFileName  String?
+  deckMimeType  String?        @default("application/pdf")
+  deckPdfPath   String?
+  deckUrl       String?
   startupName   String
   tagline       String
   founderNames  String
